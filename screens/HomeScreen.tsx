@@ -10,6 +10,9 @@ import { normalize } from "../utils";
 import type { Book } from "../types";
 import BookCard from "../components/BookCard";
 import { colors } from "../theme";
+import { USE_API } from "../config";
+import { fetchBooks, selectBooksState } from "../store/booksSlice";
+import { useAppDispatch, useAppSelector } from "../store/hooks";
 
 type Props = CompositeScreenProps<BottomTabScreenProps<TabParamList, "Home">, NativeStackScreenProps<RootStackParamList>>;
 
@@ -27,31 +30,68 @@ export function HomeScreen({ navigation }: Props) {
   //   - đặt sourceBooks = (đang đọc mảng) ? books : api.items; categories và visible đều dùng sourceBooks
   //   - status "loading" hiện ActivityIndicator; status "failed" hiện thông báo lỗi, nút "Thử lại" (dispatch lại)
   //     và nút "Dùng dữ liệu mảng" (quay về đọc mảng); kéo để làm mới cũng dispatch(fetchBooks())
+  const dispatch = useAppDispatch();
+  const api = useAppSelector(selectBooksState);
+  const [useApi, setUseApi] = useState(USE_API); // true: đọc từ API, false: đọc từ mảng
+  const sourceBooks = useApi ? api.items : books;
+
   // Lần đầu: tải mảng (có độ trễ giả lập) rồi tắt trạng thái loading
   useEffect(() => {
+    if (useApi) {
+      dispatch(fetchBooks());
+      return;
+    }
+    let cancelled = false; // tránh setState khi màn hình đã bị huỷ
     loadBooks().then((data) => {
+      if (cancelled) return;
       setBooks(data);
       setLoading(false);
     });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [useApi, dispatch]);
 
   // TODO BT10.5b: kéo để làm mới
   //   setRefreshing(true) -> setBooks(await loadBooks()) -> setRefreshing(false)
-  const onRefresh = useCallback(async () => {}, []);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    if (useApi) {
+      await dispatch(fetchBooks());
+    } else {
+      setBooks(await loadBooks());
+    }
+    setRefreshing(false);
+  }, [useApi, dispatch]);
 
-  const categories = useMemo(() => Array.from(new Set(books.map((b) => b.category))), [books]);
+  const categories = useMemo(() => Array.from(new Set(sourceBooks.map((b) => b.category))), [sourceBooks]);
 
   // TODO BT10.6: lọc theo category (null là tất cả) và theo keyword (so khớp tên hoặc tác giả,
   //   dùng normalize() để bỏ dấu); bọc trong useMemo với [books, keyword, category]
-  const visible = books;
+  const visible = useMemo(() => {
+    const kw = normalize(keyword);
+    return sourceBooks.filter((b) => {
+      const okCategory = category === null || b.category === category;
+      const okKeyword = kw === "" || normalize(b.title).includes(kw) || normalize(b.author).includes(kw);
+      return okCategory && okKeyword;
+    });
+  }, [sourceBooks, keyword, category]);
 
-  const onSelect = useCallback((id: string) => {
-    // TODO BT10.7d: navigation.navigate("Detail", { id })
-    console.log("Chọn sách", id);
-  }, []);
+  const onSelect = useCallback(
+    (id: string) => {
+      // TODO BT10.7d: navigation.navigate("Detail", { id })
+      navigation.navigate("Detail", { id });
+    },
+    [navigation]
+  );
 
   // TODO BT10.5a: numColumns = isTile ? 2 : 1
-  const numColumns = 1;
+  const numColumns = isTile ? 2 : 1;
+
+  // Đang tải: đọc mảng thì dùng loading; đọc API thì status "idle"/"loading" (trừ lúc kéo để làm mới)
+  const isLoading = useApi ? (api.status === "idle" || api.status === "loading") && !refreshing : loading;
+  // API lỗi và chưa có dữ liệu nào để hiển thị: hiện màn hình lỗi với hai nút
+  const showError = useApi && api.status === "failed" && api.items.length === 0;
 
   return (
     // TODO BT10.1b: thay View bên dưới bằng SafeAreaView (edges={["top"]}) từ react-native-safe-area-context,
@@ -85,19 +125,53 @@ export function HomeScreen({ navigation }: Props) {
         ))}
       </View>
 
-      {loading ? (
+      {isLoading ? (
         // TODO BT10.2b: hiển thị <ActivityIndicator size="large" color={colors.indigo} /> kèm chữ "Đang tải sách…"
-        <Text style={styles.empty}>Đang tải…</Text>
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={colors.indigo} />
+          <Text style={{ color: colors.muted }}>Đang tải sách…</Text>
+        </View>
+      ) : showError ? (
+        // TODO BT10.11c: status "failed": thông báo lỗi, nút "Thử lại", nút "Dùng dữ liệu mảng"
+        <View style={styles.center}>
+          <Text style={styles.errorTitle}>Không tải được danh sách sách</Text>
+          <Text style={styles.errorText}>{api.error}</Text>
+          <View style={styles.errorActions}>
+            <TouchableOpacity style={styles.errBtn} onPress={() => dispatch(fetchBooks())} testID="retry">
+              <Text style={styles.errBtnText}>Thử lại</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.errBtn, styles.errBtnAlt]}
+              onPress={() => {
+                setLoading(true); // đọc lại mảng nên hiện vòng xoay một lúc
+                setUseApi(false); // quay về đọc mảng
+              }}
+              testID="use-array"
+            >
+              <Text style={[styles.errBtnText, { color: colors.indigo }]}>Dùng dữ liệu mảng</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       ) : (
         // TODO BT10.2a: thay khối bên dưới bằng FlatList (data={visible}, keyExtractor) hiển thị tên, rating, ✅/❌
         // TODO BT10.3d: renderItem dùng <BookCard book={item} layout={isTile ? "tile" : "row"} onSelect={onSelect} />
         // TODO BT10.5a: key={String(numColumns)}, numColumns, columnWrapperStyle={isTile ? styles.columnWrapper : undefined}
         // TODO BT10.5b: refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        <View style={{ padding: 14 }}>
-          {visible.map((b) => (
-            <Text key={b.id} style={styles.plain}>{b.title}</Text>
-          ))}
-        </View>
+        <FlatList
+          key={String(numColumns)} // key đổi theo số cột để React dựng lại FlatList mới
+          data={visible}
+          keyExtractor={(b) => b.id}
+          numColumns={numColumns}
+          columnWrapperStyle={isTile ? styles.columnWrapper : undefined}
+          contentContainerStyle={{ padding: 14 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          ListHeaderComponent={
+            // Đã có dữ liệu cũ nhưng lần làm mới vừa rồi bị lỗi: báo lỗi nhỏ phía trên danh sách
+            useApi && api.status === "failed" ? <Text style={styles.banner}>{api.error}</Text> : null
+          }
+          renderItem={({ item }) => <BookCard book={item} layout={isTile ? "tile" : "row"} onSelect={onSelect} />}
+          ListEmptyComponent={<Text style={styles.empty}>Không tìm thấy sách phù hợp.</Text>}
+        />
       )}
     </SafeAreaView>
   );
